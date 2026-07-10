@@ -1,4 +1,4 @@
-# OpenCode Session Tokens Sidebar
+# OpenCode Session Usage
 
 An OpenCode TUI plugin that adds a compact session-usage panel to the sidebar.
 It aggregates the root session and all nested subagent sessions.
@@ -20,17 +20,17 @@ It aggregates the root session and all nested subagent sessions.
 Install globally:
 
 ```sh
-opencode plugin opencode-session-tokens-sidebar --global
+opencode plugin oc-plugin-session-usage --global
 ```
 
 Or install locally for the current project:
 
 ```sh
-opencode plugin opencode-session-tokens-sidebar
+opencode plugin oc-plugin-session-usage
 ```
 
 You can also open the OpenCode plugin manager, select **Install plugin**, and
-enter `opencode-session-tokens-sidebar`.
+enter `oc-plugin-session-usage`.
 
 Restart OpenCode after installation if the plugin is not loaded into the
 current TUI session.

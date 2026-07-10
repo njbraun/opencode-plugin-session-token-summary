@@ -1,15 +1,15 @@
 {
-  "name": "opencode-session-tokens-sidebar",
+  "name": "oc-plugin-session-usage",
   "version": "0.1.0",
   "description": "OpenCode TUI sidebar showing token usage across a session and its subagents.",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/njbraun/opencode-session-tokens-sidebar.git"
+    "url": "git+https://github.com/njbraun/oc-plugin-session-usage.git"
   },
-  "homepage": "https://github.com/njbraun/opencode-session-tokens-sidebar#readme",
+  "homepage": "https://github.com/njbraun/oc-plugin-session-usage#readme",
   "bugs": {
-    "url": "https://github.com/njbraun/opencode-session-tokens-sidebar/issues"
+    "url": "https://github.com/njbraun/oc-plugin-session-usage/issues"
   },
   "keywords": [
     "opencode",
