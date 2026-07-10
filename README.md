@@ -3,6 +3,8 @@
 An OpenCode TUI plugin that adds a compact session-usage panel to the sidebar.
 It aggregates the root session and all nested subagent sessions.
 
+![alt text](image.png)
+
 ## Features
 
 - Input, output, reasoning, cache read, and cache write tokens
