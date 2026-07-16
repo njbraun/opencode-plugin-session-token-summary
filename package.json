@@ -1,5 +1,5 @@
 {
-  "name": "opencode-tokens-summary",
+  "name": "opencode-plugin-session-token-summary",
   "version": "0.3.1",
   "description": "OpenCode TUI sidebar showing token usage across a session and its subagents.",
   "license": "MIT",

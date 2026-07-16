@@ -23,7 +23,8 @@ Install this plugin through OpenCode's plugin installation flow:
 
 1. Press `Ctrl+P` in OpenCode and choose **Install plugin**.
 2. Press `Tab` to install globally.
-3. Enter `opencode-tokens-summary` without a version or `@latest` suffix.
+3. Enter `opencode-plugin-session-token-summary` without a version or
+   `@latest` suffix.
 
 The installation creates an entry referencing this package in
 `~/.config/opencode/tui.json`.

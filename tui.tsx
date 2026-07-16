@@ -307,7 +307,7 @@ const tui: TuiPlugin = async (api) => {
             <box gap={0}>
             <box flexDirection="row" justifyContent="space-between">
               <text fg={api.theme.current.text}>
-                <b>Session Token Totals</b>
+                <b>Session Token Summary</b>
               </text>
               <text fg={api.theme.current.textMuted}>
                 {"↻ " + state().turns + " turn" + (state().turns === 1 ? "" : "s")}
