@@ -121,6 +121,21 @@ absolute directory path. Use the directory, not `tui.tsx`: OpenCode V2 resolves
 the directory's `tui` entrypoint and skips direct-file TUI entries. Restart the
 TUI if it does not reload.
 
+### Releasing
+
+From a clean checkout of `main`, run one command with the desired version bump:
+
+```sh
+bun run release patch # or: minor, major
+```
+
+The script updates `main`, runs all checks, bumps `package.json` and
+`package-lock.json`, creates a `release: v...` commit and matching tag, then
+pushes the commit followed by the tag. The tag triggers the Publish workflow,
+which verifies that the tag and package version match before publishing to npm
+with provenance. npm Trusted Publishing must be configured for this repository
+and the `publish.yml` workflow.
+
 ## License
 
 [MIT](LICENSE)
