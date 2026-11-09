@@ -36,13 +36,19 @@ entry. Preserve other plugins and settings:
 {
   "$schema": "https://opencode.ai/v2/cli.json",
   "plugins": [
-    "opencode-plugin-session-token-summary@^2"
+    "opencode-plugin-session-token-summary"
   ]
 }
 ```
 
 OpenCode installs the package from npm automatically. Restart the TUI if it does
 not reload.
+
+To get the latest release, run
+`opencode plugin update opencode-plugin-session-token-summary`, or run
+`opencode plugin update` to update every outdated plugin. OpenCode checks
+unpinned plugins for updates at startup but does not install them automatically.
+An exact version such as `@2.1.3` stays pinned.
 
 The `0.4.x` package targets the legacy TUI plugin API and cannot be used with
 OpenCode 2.
