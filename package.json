@@ -37,8 +37,9 @@
     "release": "bun scripts/release.ts",
     "build": "bun -e 'import solid from \"@opentui/solid/bun-plugin\"; const r = await Bun.build({ entrypoints: [\"./tui.tsx\"], outdir: \"./dist\", target: \"bun\", packages: \"external\", plugins: [solid] }); if (!r.success) { for (const l of r.logs) console.error(l); process.exit(1); }'",
     "typecheck": "tsc --noEmit",
+    "pretest": "npm run build",
     "test": "bun test --preload @opentui/solid/preload",
-    "check": "npm run build && npm run typecheck && npm run test",
+    "check": "npm run typecheck && npm run test",
     "pack:check": "npm pack --dry-run",
     "preversion": "npm run check && npm run pack:check",
     "prepublishOnly": "npm run check && npm run pack:check"

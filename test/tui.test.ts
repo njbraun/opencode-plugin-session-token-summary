@@ -1,416 +1,12 @@
-import { describe, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import type { Context, KeymapCommand, SlotClaim, ToastOptions } from "@opencode/plugin/tui/context";
+import type { ModelInfo as Model, OpenCodeClient, SessionInfo as Session, SessionMessageInfo } from "@opencode/client";
 import { RGBA, TextAttributes } from "@opentui/core";
 import { testRender, type JSX } from "@opentui/solid";
 import { Show, createComponent, createSignal } from "solid-js";
-import { createStore, produce, unwrap } from "solid-js/store";
 import { version } from "../package.json";
 import plugin from "../tui";
-import type {
-  SessionMessageAssistant as AssistantMessage,
-  SessionMessageInfo,
-  ModelInfo as Model,
-  OpenCodeClient,
-  SessionInfo as Session,
-} from "@opencode/client";
-import {
-  combineCosts,
-  computeTotals,
-  detectCacheMisses,
-  estimateCost,
-  fetchSessionMessages,
-  fetchDescendants,
-  sumSessions,
-} from "../usage";
-
-function assistant(id: string): AssistantMessage {
-  return {
-    id,
-    type: "assistant",
-    time: { created: 0 },
-    model: { id: "model", providerID: "provider" },
-    agent: "build",
-    content: [],
-    cost: 0.5,
-    tokens: {
-      input: 100,
-      output: 20,
-      reasoning: 5,
-      cache: { read: 10, write: 2 },
-    },
-  };
-}
-
-function session(id: string): Session {
-  return {
-    id,
-    projectID: "project",
-    location: { directory: "/" },
-    title: id,
-    cost: 1,
-    tokens: {
-      input: 50,
-      output: 10,
-      reasoning: 2,
-      cache: { read: 3, write: 1 },
-    },
-    time: { created: 0, updated: 0 },
-  };
-}
-
-function pricedModel(
-  id: string,
-  providerID: string,
-  cost: Model["cost"][number],
-): Model {
-  return {
-    id,
-    modelID: id,
-    providerID,
-    cost: [cost],
-  } as Model;
-}
-
-function cacheRequest(id: string, created: number, tokens: { input?: number; read?: number; write?: number }): AssistantMessage {
-  return {
-    ...assistant(id),
-    time: { created, completed: created + 1 },
-    tokens: { input: tokens.input ?? 0, output: 0, reasoning: 0, cache: { read: tokens.read ?? 0, write: tokens.write ?? 0 } },
-  };
-}
-
-function clientFor(
-  children: Record<string, Session[]>,
-  messages: Record<string, SessionMessageInfo[]>,
-): OpenCodeClient {
-  return {
-    session: {
-      get: async ({ sessionID }: { sessionID: string }) => session(sessionID),
-      list: async ({ parentID }: { parentID: string }) => ({
-        data: children[parentID] ?? [],
-        cursor: {},
-      }),
-    },
-    message: {
-      list: async ({ sessionID }: { sessionID: string }) => ({
-        data: messages[sessionID] ?? [],
-        cursor: {},
-      }),
-    },
-  } as unknown as OpenCodeClient;
-}
-
-function storageFor(saved: Record<string, object>) {
-  return {
-    store<Value extends object>(key: string, { initial }: { initial: Value }) {
-      const [state, setState] = createStore(structuredClone((saved[key] ?? initial) as Value));
-      return [state, async (mutation: (draft: Value) => void) => {
-        setState(produce(mutation));
-        saved[key] = structuredClone(unwrap(state));
-      }] as const;
-    },
-  };
-}
-
-describe("token aggregation", () => {
-  test("sums assistant messages and descendant session aggregates", () => {
-    const root = computeTotals([assistant("root-1")]);
-    const descendants = sumSessions([session("child")], 2);
-
-    expect(root).toMatchObject({ input: 100, output: 20, turns: 1, cost: 0.5 });
-    expect(descendants).toMatchObject({ input: 50, output: 10, turns: 2, cost: 1 });
-  });
-});
-
-describe("cost estimation", () => {
-  test("uses the same token categories and per-million rates as OpenCode", () => {
-    const message = assistant("priced");
-    message.cost = 0;
-    message.model = { id: "claude-opus-4-6", providerID: "anthropic" };
-    const model = pricedModel(message.model.id, message.model.providerID, {
-      input: 3,
-      output: 15,
-      cache: { read: 0.3, write: 3.75 },
-    });
-
-    expect(estimateCost([message], [model])).toBeCloseTo(
-      0.0006855,
-    );
-  });
-
-  test("finds API pricing across providers for quota-backed model aliases", () => {
-    const message = assistant("quota");
-    message.cost = 0;
-    message.model = { id: "claude-opus-4.6", providerID: "github-copilot" };
-    const quotaModel = pricedModel(message.model.id, message.model.providerID, {
-      input: 0,
-      output: 0,
-      cache: { read: 0, write: 0 },
-    });
-    const apiModel = pricedModel("claude-opus-4-6", "anthropic", {
-      input: 3,
-      output: 15,
-      cache: { read: 0.3, write: 3.75 },
-    });
-
-    expect(
-      estimateCost(
-        [message],
-        [
-          quotaModel,
-          apiModel,
-        ],
-      ),
-    ).toBeGreaterThan(0);
-  });
-
-  test("combines reported and estimated costs into one mixed total", () => {
-    const reported = assistant("reported");
-    const quota = assistant("quota");
-    quota.cost = 0;
-    quota.model = { id: "claude-opus-4-6", providerID: "anthropic" };
-    const model = pricedModel(quota.model.id, quota.model.providerID, {
-      input: 3,
-      output: 15,
-      cache: { read: 0.3, write: 3.75 },
-    });
-
-    expect(
-      combineCosts(reported.cost!, [reported, quota], [model]),
-    ).toEqual({ cost: 0.5006855, mode: "mixed" });
-  });
-
-  test("marks a fully estimated total", () => {
-    const quota = assistant("quota");
-    quota.cost = 0;
-    const model = pricedModel(quota.model.id, quota.model.providerID, {
-      input: 3,
-      output: 15,
-      cache: { read: 0.3, write: 3.75 },
-    });
-
-    expect(combineCosts(0, [quota], [model])).toEqual({
-      cost: 0.0006855,
-      mode: "estimated",
-    });
-  });
-
-  test("does not estimate messages with an omitted cost", () => {
-    const message = assistant("missing");
-    delete (message as { cost?: number }).cost;
-    const model = pricedModel(message.model.id, message.model.providerID, {
-      input: 3,
-      output: 15,
-      cache: { read: 0.3, write: 3.75 },
-    });
-
-    expect(combineCosts(0.25, [message], [model])).toEqual({
-      cost: 0.25,
-      mode: "reported",
-    });
-  });
-
-  test("uses context tiers only above their threshold", () => {
-    const message = assistant("tiered");
-    const model = pricedModel("model", "provider", {
-      input: 1, output: 1, cache: { read: 1, write: 1 },
-    });
-    model.cost.push({
-      tier: { type: "context", size: 112 },
-      input: 2, output: 2, cache: { read: 2, write: 2 },
-    });
-    expect(estimateCost([message], [model])).toBeCloseTo(0.000137);
-    message.tokens!.input += 1;
-    expect(estimateCost([message], [model])).toBeCloseTo(0.000276);
-  });
-
-  test("skips unfinished assistant messages without tokens", () => {
-    const message = assistant("unfinished");
-    delete message.tokens;
-    const model = pricedModel("model", "provider", {
-      input: 1, output: 1, cache: { read: 1, write: 1 },
-    });
-    expect(estimateCost([message], [model])).toBe(0);
-    expect(computeTotals([message])).toMatchObject({ input: 0, turns: 1 });
-  });
-});
-
-describe("descendant fetching", () => {
-  test("follows message cursors and requests only assistant messages", async () => {
-    const client = clientFor({}, {});
-    const calls: unknown[] = [];
-    client.message.list = async (input) => {
-      calls.push(input);
-      return input.cursor
-        ? { data: [assistant("second")], cursor: {} }
-        : { data: [assistant("first")], cursor: { next: "more" } };
-    };
-    expect(await fetchSessionMessages(client, "root")).toHaveLength(2);
-    expect(calls).toEqual([
-      { sessionID: "root", type: "assistant", limit: 100, order: "desc" },
-      { sessionID: "root", type: "assistant", limit: 100, cursor: "more" },
-    ]);
-  });
-
-  test("follows child cursors without including unrelated sessions", async () => {
-    const client = clientFor({}, {});
-    client.session.list = async (input) => {
-      if (input?.parentID !== "root") return { data: [], cursor: {} };
-      return input.cursor
-        ? { data: [session("second")], cursor: {} }
-        : { data: [session("first")], cursor: { next: "more" } };
-    };
-    expect((await fetchDescendants(client, "root")).sessions.map((s) => s.id))
-      .toEqual(["first", "second"]);
-  });
-
-  test("includes compactions only when requested and follows their message cursors", async () => {
-    const reset: SessionMessageInfo = {
-      id: "reset", type: "compaction", status: "completed", reason: "manual",
-      summary: "", recent: "", time: { created: 1 },
-    };
-    const client = clientFor({}, {});
-    const calls: unknown[] = [];
-    client.message.list = async (input) => {
-      calls.push(input);
-      return input.cursor
-        ? { data: [assistant("first")], cursor: {} }
-        : { data: [reset], cursor: { next: "more" } };
-    };
-    expect(await fetchSessionMessages(client, "root", true)).toEqual([reset, assistant("first")]);
-    expect(calls).toEqual([
-      { sessionID: "root", limit: 100, order: "desc" },
-      { sessionID: "root", limit: 100, cursor: "more" },
-    ]);
-  });
-
-  test("detects descendant misses separately and excludes compactions from turn counts", async () => {
-    const reset: SessionMessageInfo = {
-      id: "reset", type: "compaction", status: "completed", reason: "manual",
-      summary: "", recent: "", time: { created: 0 },
-    };
-    const client = clientFor({ root: [session("a"), session("b")] }, {
-      a: [cacheRequest("a-first", 1, { read: 100_000 })],
-      b: [reset, cacheRequest("b-first", 2, { write: 100_000 }), cacheRequest("b-miss", 3, { write: 110_000 })],
-    });
-    const data = await fetchDescendants(client, "root", true);
-    expect(data.turns).toBe(3);
-    expect(data.messages.every((message) => message.type === "assistant")).toBe(true);
-    expect(data.cacheMisses).toEqual([{
-      sessionID: "b", messageID: "b-miss", missedTokens: 100_000, modelChanged: false, idleMs: 1,
-    }]);
-  });
-
-  test("collects nested descendants once and counts their assistant turns", async () => {
-    const child = session("child");
-    const grandchild = session("grandchild");
-    const client = clientFor(
-      { root: [child], child: [grandchild], grandchild: [child] },
-      { child: [assistant("child-1")], grandchild: [assistant("grandchild-1")] },
-    );
-
-    await expect(fetchDescendants(client, "root")).resolves.toEqual({
-      sessions: [child, grandchild],
-      messages: [assistant("child-1"), assistant("grandchild-1")],
-      turns: 2,
-      cacheMisses: [],
-    });
-  });
-
-  test("fails the refresh when any descendant request fails", async () => {
-    const client = clientFor({ root: [session("child")] }, {});
-    const messageApi = client.message as unknown as {
-      list: () => Promise<never>;
-    };
-    messageApi.list = async () => {
-      throw new Error("unavailable");
-    };
-
-    await expect(fetchDescendants(client, "root")).rejects.toThrow("unavailable");
-  });
-
-  test("limits concurrent descendant requests", async () => {
-    let active = 0;
-    let peak = 0;
-    const children: Record<string, Session[]> = {
-      root: Array.from({ length: 8 }, (_, index) => session(`child-${index}`)),
-    };
-    const client = clientFor(children, {});
-    const sessionApi = client.session as unknown as {
-      list: ({ parentID }: { parentID: string }) => Promise<{ data: Session[]; cursor: object }>;
-    };
-    sessionApi.list = async ({ parentID }) => {
-      active += 1;
-      peak = Math.max(peak, active);
-      await Bun.sleep(5);
-      active -= 1;
-      return { data: children[parentID] ?? [], cursor: {} };
-    };
-
-    await fetchDescendants(client, "root");
-    expect(peak).toBeLessThanOrEqual(4);
-  });
-});
-
-describe("Pi-style cache-miss detection", () => {
-  test("ignores the first request and healthy cache reads, and detects full and partial misses", () => {
-    const first = cacheRequest("first", 0, { write: 100_000 });
-    const healthy = cacheRequest("healthy", 60_000, { read: 100_000, write: 5_000 });
-    expect(detectCacheMisses([healthy, first], "root")).toEqual([]);
-    const miss = cacheRequest("miss", 600_000, { write: 110_000 });
-    expect(detectCacheMisses([miss, healthy, first], "root")).toEqual([{
-      sessionID: "root", messageID: "miss", missedTokens: 105_000, modelChanged: false, idleMs: 540_000,
-    }]);
-    const partial = cacheRequest("partial", 120_000, { read: 80_000, write: 30_000 });
-    expect(detectCacheMisses([first, healthy, partial], "root")[0].missedTokens).toBe(25_000);
-  });
-
-  test("ignores 1024-token noise, prompt growth, and a fully cached smaller prompt", () => {
-    const first = cacheRequest("first", 0, { write: 100_000 });
-    const noise = cacheRequest("noise", 1, { read: 98_976, write: 1024 });
-    expect(detectCacheMisses([first, noise], "root")).toEqual([]);
-    noise.tokens!.cache.read -= 1;
-    noise.tokens!.cache.write += 1;
-    expect(detectCacheMisses([first, noise], "root")[0].missedTokens).toBe(1025);
-    const smaller = cacheRequest("smaller", 1, { read: 20_000 });
-    const larger = cacheRequest("larger", 2, { read: 20_000, write: 100_000 });
-    expect(detectCacheMisses([first, smaller, larger], "root")).toEqual([]);
-  });
-
-  test("requires cache activity but remembers it for read-only providers and zero-usage messages", () => {
-    const first = cacheRequest("first", 0, { input: 100_000 });
-    const next = cacheRequest("next", 1, { input: 110_000 });
-    expect(detectCacheMisses([first, next], "root")).toEqual([]);
-    first.tokens!.cache.read = 100_000;
-    first.tokens!.input = 0;
-    const zero = cacheRequest("zero", 0.5, {});
-    expect(detectCacheMisses([first, zero, next], "root")[0].missedTokens).toBe(100_000);
-  });
-
-  test("resets after compaction and does not exempt model switches", () => {
-    const first = cacheRequest("first", 0, { write: 100_000 });
-    const next = cacheRequest("next", 2, { write: 100_000 });
-    next.model = { providerID: "other-provider", id: "other-model" };
-    expect(detectCacheMisses([first, next], "root")[0].modelChanged).toBe(true);
-    const reset: SessionMessageInfo = {
-      id: "reset", type: "compaction", status: "completed", reason: "manual",
-      summary: "", recent: "", time: { created: 1 },
-    };
-    expect(detectCacheMisses([first, reset, next], "root")).toEqual([]);
-  });
-
-  test("ignores failed, incomplete, and tokenless responses without replacing the baseline", () => {
-    const first = cacheRequest("first", 0, { write: 100_000 });
-    const failed = cacheRequest("failed", 1, { write: 200_000 });
-    failed.error = { type: "provider.unknown", message: "unavailable" };
-    const streaming = cacheRequest("streaming", 2, { write: 200_000 });
-    delete streaming.time.completed;
-    const tokenless = cacheRequest("tokenless", 3, {});
-    delete tokenless.tokens;
-    const healthy = cacheRequest("healthy", 4, { read: 100_000 });
-    expect(detectCacheMisses([first, failed, streaming, tokenless, healthy], "root")).toEqual([]);
-  });
-});
+import { assistant, cacheRequest, clientFor, session, storageFor } from "./helpers";
 
 test("V2 plugin renders, switches sessions, retains totals on failure, and cleans up", async () => {
   expect(plugin.id).toBe("opencode-session-tokens-sidebar");
@@ -500,12 +96,88 @@ test("V2 plugin renders, switches sessions, retains totals on failure, and clean
     await view.flush();
     expect(view.captureCharFrame()).toContain("$1.00");
     expect(view.captureCharFrame()).not.toContain("unavailable");
+    expect(view.captureCharFrame()).toContain("stale");
     handlers.get("session.usage.updated")!({ data: { sessionID: "other" } });
     cleanup!();
     expect(handlers.size).toBe(0);
     expect(slotRemoved).toBe(true);
   } finally {
     if (!slotRemoved) cleanup?.();
+    await view.dispose();
+  }
+});
+
+test("shows a selection error instead of loading forever when no session is selected", async () => {
+  const color = RGBA.fromHex("#c6d0f5");
+  let claim: SlotClaim<"sidebar.content">;
+  let cleanup: (() => void) | undefined;
+  const context = {
+    client: clientFor({}, {}),
+    storage: storageFor({}),
+    keymap: { layer() {} },
+    data: { on: () => () => {} },
+    ui: {
+      slot(value: SlotClaim<"sidebar.content">) { claim = value; return () => {}; },
+    },
+    theme: {
+      text: { base: color, muted: color, feedback: { info: { base: color }, warning: { base: color }, error: { base: color } } },
+      border: { base: color },
+    },
+  } as unknown as Context;
+  const view = await testRender(() => {
+    cleanup = plugin.setup(context) as () => void;
+    return claim.render({ sessionID: "" });
+  }, { width: 60, height: 20 });
+  try {
+    await view.waitForFrame((frame) => frame.includes("No session selected"));
+    expect(view.captureCharFrame()).toContain("No session selected");
+  } finally {
+    cleanup?.();
+    await view.dispose();
+  }
+});
+
+test("retries a transient session lookup instead of flashing an error", async () => {
+  const color = RGBA.fromHex("#c6d0f5");
+  const client = clientFor({ root: [session("child")] }, {
+    root: [assistant("root-turn")], child: [assistant("child-turn")],
+  });
+  let attempts = 0;
+  const getSession = client.session.get;
+  client.session.get = async (input) => {
+    attempts += 1;
+    if (attempts < 3) throw new Error("session not found");
+    return getSession(input);
+  };
+  let claim: SlotClaim<"sidebar.content">;
+  let cleanup: (() => void) | undefined;
+  const context = {
+    client,
+    storage: storageFor({}),
+    keymap: { layer() {} },
+    data: { on: () => () => {} },
+    ui: {
+      slot(value: SlotClaim<"sidebar.content">) { claim = value; return () => {}; },
+    },
+    theme: {
+      text: { base: color, muted: color, feedback: { info: { base: color }, warning: { base: color }, error: { base: color } } },
+      border: { base: color },
+    },
+  } as unknown as Context;
+  const view = await testRender(() => {
+    cleanup = plugin.setup(context) as () => void;
+    return claim.render({ sessionID: "root" });
+  }, { width: 60, height: 20 });
+  try {
+    await Bun.sleep(100);
+    await view.flush();
+    expect(view.captureCharFrame()).not.toContain("session not found");
+    await Bun.sleep(800);
+    await view.flush();
+    expect(view.captureCharFrame()).toContain("2 turns");
+    expect(attempts).toBeGreaterThanOrEqual(3);
+  } finally {
+    cleanup?.();
     await view.dispose();
   }
 });

@@ -2,7 +2,13 @@ name: CI
 
 on:
   push:
+    branches: [main]
+    tags: ["v*.*.*"]
   pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   verify:

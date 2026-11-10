@@ -19,9 +19,13 @@ export type TokenTotals = {
 export type DescendantData = {
   sessions: ReadonlyArray<SessionInfo>;
   messages: ReadonlyArray<SessionMessageAssistant>;
+  costMessages: ReadonlyArray<SessionMessageInfo>;
   turns: number;
   cacheMisses: ReadonlyArray<CacheMiss>;
+  partial: boolean;
 };
+
+export type SessionMessageCache = Map<string, SessionMessageInfo[]>;
 
 export type CacheMiss = {
   sessionID: string;
@@ -33,10 +37,18 @@ export type CacheMiss = {
 
 export type CostMode = "reported" | "estimated" | "mixed";
 
-type CostMessage = Pick<
-  SessionMessageAssistant,
-  "model" | "tokens"
-> & { cost?: number };
+export type CostMessage = {
+  model?: { id: string; providerID: string };
+  tokens?: {
+    input: number;
+    output: number;
+    reasoning: number;
+    cache: { read: number; write: number };
+  };
+  error?: unknown;
+  cost?: number;
+  [key: string]: unknown;
+};
 
 export const EMPTY: TokenTotals = {
   input: 0,
@@ -49,6 +61,12 @@ export const EMPTY: TokenTotals = {
 };
 
 const FETCH_CONCURRENCY = 4;
+const CACHE_MISS_TOKEN_THRESHOLD = 1024;
+
+type PricingIndex = {
+  exact: Map<string, ModelInfo>;
+  normalized: Map<string, ModelInfo[]>;
+};
 
 function hasPrice(model: ModelInfo): boolean {
   return model.cost.some((cost) =>
@@ -60,32 +78,61 @@ function normalizedModelID(id: string): string {
   return (id.split("/").pop() || id).toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
+function pricingKey(providerID: string, modelID: string): string {
+  return `${providerID}\u0000${modelID}`;
+}
+
+function buildPricingIndex(models: ReadonlyArray<ModelInfo>): PricingIndex {
+  const exact = new Map<string, ModelInfo>();
+  const normalized = new Map<string, ModelInfo[]>();
+  for (const model of models) {
+    if (!hasPrice(model)) continue;
+    exact.set(pricingKey(model.providerID, model.id), model);
+    if (model.modelID && model.modelID !== model.id) {
+      exact.set(pricingKey(model.providerID, model.modelID), model);
+    }
+    const ids = [model.id, model.modelID].filter((id): id is string => !!id);
+    for (const id of new Set(ids)) {
+      const key = normalizedModelID(id);
+      const candidates = normalized.get(key);
+      if (candidates) {
+        if (!candidates.includes(model)) candidates.push(model);
+      } else {
+        normalized.set(key, [model]);
+      }
+    }
+  }
+  return { exact, normalized };
+}
+
 function pricingFor(
-  models: ReadonlyArray<ModelInfo>,
+  index: PricingIndex,
   providerID: string,
   modelID: string,
 ): ModelInfo | undefined {
-  const exact = models.find((model) =>
-    model.providerID === providerID && (model.id === modelID || model.modelID === modelID)
-  );
-  if (exact && hasPrice(exact)) return exact;
+  const exact = index.exact.get(pricingKey(providerID, modelID));
+  if (exact) return exact;
 
-  const normalized = normalizedModelID(modelID);
-  return models.find(
-    (model) =>
-      hasPrice(model) &&
-      (normalizedModelID(model.id) === normalized || normalizedModelID(model.modelID) === normalized),
-  );
+  const candidates = index.normalized.get(normalizedModelID(modelID));
+  if (!candidates) return undefined;
+  return candidates.find((model) => model.providerID === providerID) ?? candidates[0];
+}
+
+export function needsCostEstimate(message: CostMessage): boolean {
+  return message.cost === 0 && !!message.tokens && !message.error;
 }
 
 export function estimateCost(
   messages: ReadonlyArray<CostMessage>,
   models: ReadonlyArray<ModelInfo>,
+  index?: PricingIndex,
 ): number {
+  const pricing = index ?? buildPricingIndex(models);
   let total = 0;
   for (const message of messages) {
-    const model = pricingFor(models, message.model.providerID, message.model.id);
-    if (!model || !message.tokens) continue;
+    if (message.error || !message.tokens || !message.model) continue;
+    const model = pricingFor(pricing, message.model.providerID, message.model.id);
+    if (!model) continue;
 
     const tokens = message.tokens;
     const contextTokens = tokens.input + tokens.cache.read + tokens.cache.write;
@@ -114,8 +161,9 @@ export function combineCosts(
   models: ReadonlyArray<ModelInfo>,
 ): { cost: number; mode: CostMode } {
   const estimatedCost = estimateCost(
-    messages.filter((message) => message.cost === 0),
+    messages.filter(needsCostEstimate),
     models,
+    buildPricingIndex(models),
   );
   return {
     cost: reportedCost + estimatedCost,
@@ -209,13 +257,13 @@ export function detectCacheMisses(
     if (prompt <= 0) continue;
     const hasCache = tokens.cache.read + tokens.cache.write > 0;
     const missedTokens = Math.min(previousPrompt, prompt) - tokens.cache.read;
-    if (previous && (hasCache || reportedCache) && missedTokens > 1024) {
+    if (previous && (hasCache || reportedCache) && missedTokens > CACHE_MISS_TOKEN_THRESHOLD) {
       misses.push({
         sessionID,
         messageID: message.id,
         missedTokens,
         modelChanged: message.model.providerID !== previous.model.providerID || message.model.id !== previous.model.id,
-        idleMs: Math.max(0, message.time.created - previous.time.created),
+        idleMs: Math.max(0, message.time.created - (previous.time.completed ?? previous.time.created)),
       });
     }
     previous = message;
@@ -225,11 +273,50 @@ export function detectCacheMisses(
   return misses;
 }
 
+async function fetchCachedSessionMessages(
+  client: OpenCodeClient,
+  sessionID: string,
+  cache: SessionMessageCache,
+): Promise<SessionMessageInfo[]> {
+  const cached = cache.get(sessionID) ?? [];
+  const cachedIDs = new Set(cached.map((message) => message.id));
+  const fetched: SessionMessageInfo[] = [];
+  let cursor: string | undefined;
+
+  do {
+    const page = await client.message.list({
+      sessionID,
+      limit: 100,
+      ...(cursor ? { cursor } : { order: "desc" }),
+    });
+    fetched.push(...page.data);
+    if (cachedIDs.size > 0 && page.data.some((message) => cachedIDs.has(message.id))) {
+      break;
+    }
+    cursor = page.cursor.next ?? undefined;
+  } while (cursor);
+
+  const merged = new Map<string, SessionMessageInfo>();
+  for (const message of cached) merged.set(message.id, message);
+  for (const message of fetched) merged.set(message.id, message);
+  const messages = [...merged.values()]
+    .filter((message) => isAssistant(message) || message.type === "compaction")
+    .sort((a, b) => a.time.created - b.time.created || a.id.localeCompare(b.id));
+  cache.set(sessionID, messages);
+  return messages;
+}
+
 export async function fetchSessionMessages(
   client: OpenCodeClient,
   sessionID: string,
   includeCompactions = false,
+  cache?: SessionMessageCache,
 ): Promise<SessionMessageInfo[]> {
+  if (cache) {
+    const messages = await fetchCachedSessionMessages(client, sessionID, cache);
+    return includeCompactions ? messages : messages.filter(isAssistant);
+  }
+
   const messages: SessionMessageInfo[] = [];
   let cursor: string | undefined;
   do {
@@ -249,6 +336,7 @@ export async function fetchDescendants(
   client: OpenCodeClient,
   rootID: string,
   includeCompactions = false,
+  cache?: SessionMessageCache,
 ): Promise<DescendantData> {
   const out: SessionInfo[] = [];
   const visited = new Set([rootID]);
@@ -283,14 +371,33 @@ export async function fetchDescendants(
   }
 
   const histories = await mapWithConcurrency(out, async (session) => {
-    const messages = await fetchSessionMessages(client, session.id, includeCompactions);
-    return {
-      messages: messages.filter(isAssistant),
-      cacheMisses: includeCompactions ? detectCacheMisses(messages, session.id) : [],
-    };
+    try {
+      const messages = await fetchSessionMessages(client, session.id, includeCompactions, cache);
+      return {
+        ok: true as const,
+        messages: messages.filter(isAssistant),
+        costMessages: messages,
+        cacheMisses: includeCompactions ? detectCacheMisses(messages, session.id) : [],
+      };
+    } catch {
+      return {
+        ok: false as const,
+        messages: [] as SessionMessageAssistant[],
+        costMessages: [] as SessionMessageInfo[],
+        cacheMisses: [] as CacheMiss[],
+      };
+    }
   });
   const messages = histories.flatMap((history) => history.messages);
-  const turns = messages.length;
+  const costMessages = histories.flatMap((history) => history.costMessages);
+  const turns = computeTotals(messages).turns;
 
-  return { sessions: out, messages, turns, cacheMisses: histories.flatMap((history) => history.cacheMisses) };
+  return {
+    sessions: out,
+    messages,
+    costMessages,
+    turns,
+    cacheMisses: histories.flatMap((history) => history.cacheMisses),
+    partial: histories.some((history) => !history.ok),
+  };
 }
